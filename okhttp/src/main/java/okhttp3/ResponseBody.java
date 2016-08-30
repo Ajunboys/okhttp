@@ -145,24 +145,30 @@ public abstract class ResponseBody implements Closeable {
   /**
    * Returns the response as a character stream decoded with the charset of the Content-Type header.
    * If that header is either absent or lacks a charset, this will attempt to decode the response
-   * body as UTF-8.
+   * body in accordance to its BOM or UTF-8.
    */
   public final Reader charStream() {
     Reader r = reader;
-    return r != null ? r : (reader = new InputStreamReader(byteStream(), charset()));
+    return r != null ? r : (reader = new BomAwareReader(source(), charset()));
   }
 
   /**
    * Returns the response as a string decoded with the charset of the Content-Type header. If that
-   * header is either absent or lacks a charset, this will attempt to decode the response body as
-   * UTF-8. Closes {@link ResponseBody} automatically.
+   * header is either absent or lacks a charset, this will attempt to decode the response body in
+   * accordance to its BOM or UTF-8. Closes {@link ResponseBody} automatically.
    *
    * <p>This method loads entire response body into memory. If the response body is very large this
    * may trigger an {@link OutOfMemoryError}. Prefer to stream the response body if this is a
    * possibility for your response.
    */
   public final String string() throws IOException {
-    return new String(bytes(), charset().name());
+    BufferedSource source = source();
+    try {
+      Charset charset = Util.bomAwareCharset(source, charset());
+      return source.readString(charset);
+    } finally {
+      Util.closeQuietly(source);
+    }
   }
 
   private Charset charset() {
@@ -214,5 +220,36 @@ public abstract class ResponseBody implements Closeable {
         return content;
       }
     };
+  }
+
+  static final class BomAwareReader extends Reader {
+    private final BufferedSource source;
+    private final Charset charset;
+
+    private boolean closed;
+    private Reader delegate;
+
+    private BomAwareReader(BufferedSource source, Charset charset) {
+      this.source = source;
+      this.charset = charset;
+    }
+
+    @Override public int read(char[] cbuf, int off, int len) throws IOException {
+      if (closed) throw new IOException("Stream closed");
+
+      Reader delegate = this.delegate;
+      if (delegate == null) {
+        Charset charset = Util.bomAwareCharset(source, this.charset);
+        delegate = this.delegate = new InputStreamReader(source.inputStream(), charset);
+      }
+      return delegate.read(cbuf, off, len);
+    }
+
+    @Override public void close() throws IOException {
+      closed = true;
+      if (delegate != null) {
+        delegate.close();
+      }
+    }
   }
 }
